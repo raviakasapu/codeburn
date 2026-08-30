@@ -99,6 +99,7 @@ describe('bahulam provider - identity', () => {
 describe('bahulam provider - sessions dir resolution', () => {
   afterEach(() => {
     delete process.env['BAHULAM_PROJECTS_DIR']
+    delete process.env['BAHULAM_HOME']
   })
 
   it('defaults to ~/.bahulam/projects', async () => {
@@ -108,6 +109,21 @@ describe('bahulam provider - sessions dir resolution', () => {
   })
 
   it('honors BAHULAM_PROJECTS_DIR', async () => {
+    process.env['BAHULAM_PROJECTS_DIR'] = '/custom/projects'
+    await expect(createBahulamProvider().probeRoots()).resolves.toEqual(
+      [{ path: '/custom/projects', label: 'projects' }]
+    )
+  })
+
+  it('uses BAHULAM_HOME/projects when BAHULAM_PROJECTS_DIR is unset', async () => {
+    process.env['BAHULAM_HOME'] = '/custom/bahulam-home'
+    await expect(createBahulamProvider().probeRoots()).resolves.toEqual(
+      [{ path: '/custom/bahulam-home/projects', label: 'projects' }]
+    )
+  })
+
+  it('prefers BAHULAM_PROJECTS_DIR over BAHULAM_HOME', async () => {
+    process.env['BAHULAM_HOME'] = '/custom/bahulam-home'
     process.env['BAHULAM_PROJECTS_DIR'] = '/custom/projects'
     await expect(createBahulamProvider().probeRoots()).resolves.toEqual(
       [{ path: '/custom/projects', label: 'projects' }]
@@ -172,6 +188,45 @@ describe('bahulam provider - parsing', () => {
     expect(calls[0]?.cacheCreationInputTokens).toBe(2)
     expect(calls[0]?.reasoningTokens).toBe(1)
     expect(calls.every(c => c.provider === 'bahulam')).toBe(true)
+  })
+
+  it('labels non-root model roles as subagent calls', async () => {
+    await writeSession(tmpDir, 'my-project', 'sess-a', [
+      userMessage('delegate planning', T1),
+      completeEvent({
+        total_input_tokens: 300,
+        total_output_tokens: 30,
+        models: [
+          { model: 'mimo-v2.5', role: 'coder', input_tokens: 200, output_tokens: 10, cost: 0.02 },
+          { model: 'deepseek-v4-pro', role: 'plan', input_tokens: 100, output_tokens: 20, cost: 0.03 },
+        ],
+      }, T2),
+    ])
+
+    const calls = await collect(tmpDir)
+
+    expect(calls).toHaveLength(2)
+    expect(calls[0]?.subagentTypes).toEqual([])
+    expect(calls[1]?.subagentTypes).toEqual(['plan'])
+    expect(calls[0]?.costUSD).toBe(0.02)
+    expect(calls[1]?.costUSD).toBe(0.03)
+  })
+
+  it('subtracts cache tokens from per-model total_input_tokens records', async () => {
+    await writeSession(tmpDir, 'my-project', 'sess-a', [
+      userMessage('multi total input', T1),
+      completeEvent({
+        models: [
+          { model: 'claude-sonnet-4-6', total_input_tokens: 100, output_tokens: 10, cache_read_tokens: 5, cache_creation_tokens: 2, cost: 0.01 },
+          { model: 'claude-opus-4-5', total_input_tokens: 200, output_tokens: 20, cost: 0.03 },
+        ],
+      }, T2),
+    ])
+
+    const calls = await collect(tmpDir)
+
+    expect(calls).toHaveLength(2)
+    expect(calls.map(c => c.inputTokens)).toEqual([93, 200])
   })
 
   it('carries session identity, project and timestamps onto each call', async () => {
@@ -356,7 +411,7 @@ describe('bahulam provider - multi-model', () => {
 
     expect(calls).toHaveLength(2)
     expect(calls.map(c => c.model)).toEqual(['anthropic/claude-sonnet-4-6', 'anthropic/claude-opus-4-5'])
-    expect(calls.map(c => c.inputTokens)).toEqual([93, 200])
+    expect(calls.map(c => c.inputTokens)).toEqual([100, 200])
     expect(calls.map(c => c.outputTokens)).toEqual([10, 20])
     expect(calls.map(c => c.costUSD)).toEqual([0.01, 0.03])
     expect(calls.every(c => c.costIsEstimated === false)).toBe(true)

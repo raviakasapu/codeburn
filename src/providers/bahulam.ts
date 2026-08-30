@@ -3,9 +3,9 @@
 //
 //   ~/.bahulam/projects/<project-slug>/<session-id>.jsonl
 //
-// The wire format uses `bahulam_event` / `kepler_event` as the top-level type;
-// per-turn usage and cost live in `event.data.usage`.  Every record carries
-// `type`, `timestamp`, and `cwd` at the top level.
+// The wire format uses `bahulam_event` as the top-level type; per-turn usage
+// and cost live in `event.data.usage`.  Every record carries `type`,
+// `timestamp`, and `cwd` at the top level.
 
 import { readdir, stat } from 'fs/promises'
 import { basename, join } from 'path'
@@ -19,10 +19,14 @@ import type { ProbeRoot, Provider, SessionSource, SessionParser, ParsedProviderC
 const PROVIDER_NAME = 'bahulam'
 const DISPLAY_NAME = 'Bahulam Code'
 
-// Default root. Honor the same env var opentab uses.
+// Default root. Honor the same env vars opentab uses.
 function getRootDir(override?: string): string {
-  const env = process.env['BAHULAM_PROJECTS_DIR']
-  return override ?? env ?? join(homedir(), '.bahulam', 'projects')
+  if (override) return override
+  const projectsDir = process.env['BAHULAM_PROJECTS_DIR']
+  if (projectsDir) return projectsDir
+  const bahulamHome = process.env['BAHULAM_HOME']
+  if (bahulamHome) return join(bahulamHome, 'projects')
+  return join(homedir(), '.bahulam', 'projects')
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────
@@ -49,6 +53,19 @@ function firstValue(...values: unknown[]): number {
     if (v !== null && v !== undefined && v !== '') return safeNum(v)
   }
   return 0
+}
+
+function hasValue(value: unknown): boolean {
+  return value !== null && value !== undefined && value !== ''
+}
+
+function isRootRole(role: string): boolean {
+  return role === '' || role === 'coder' || role === 'main' || role === 'executor' || role === 'orchestrator'
+}
+
+function subagentTypesForRole(role: string): string[] {
+  const normalized = role.trim()
+  return normalized && !isRootRole(normalized) ? [normalized] : []
 }
 
 function qualifiedModel(modelName: string): string {
@@ -102,6 +119,12 @@ function extractUsefulBashCommands(command: string): string[] {
     .filter(line => line && !line.startsWith('#'))
     .join('\n')
   return extractBashCommands(normalized).filter(cmd => cmd !== '#' && cmd !== '\\')
+}
+
+function modelInputTokens(modelUsage: Record<string, unknown>, cacheRead: number, cacheWrite: number): number {
+  if (hasValue(modelUsage['input_tokens'])) return safeNum(modelUsage['input_tokens'])
+  const totalInput = firstValue(modelUsage['total_input_tokens'], modelUsage['prompt_tokens'])
+  return Math.max(0, totalInput - cacheRead - cacheWrite)
 }
 
 // ── session file discovery ─────────────────────────────────────────────────
@@ -206,8 +229,8 @@ function createParser(source: SessionSource, seenKeys: Set<string>): SessionPars
           continue
         }
 
-        // ── bahulam_event / kepler_event ───────────────────────────────────
-        if (entry.type !== 'bahulam_event' && entry.type !== 'kepler_event') continue
+        // ── bahulam_event ──────────────────────────────────────────────────
+        if (entry.type !== 'bahulam_event') continue
 
         const event = entry.event
         if (!event || typeof event !== 'object') continue
@@ -313,6 +336,7 @@ function createParser(source: SessionSource, seenKeys: Set<string>): SessionPars
               costIsEstimated: overrides?.costIsEstimated ?? !costField.reported,
               tools: [...pendingTools],
               bashCommands: [...pendingBashCommands],
+              subagentTypes: overrides?.subagentTypes ?? [],
               timestamp,
               speed: 'standard',
               deduplicationKey: dedupKey,
@@ -334,13 +358,13 @@ function createParser(source: SessionSource, seenKeys: Set<string>): SessionPars
               const mModel = qualifiedModel(String(me['model'] ?? ''))
               if (!mModel) continue
 
-              const mTotalIn = firstValue(me['total_input_tokens'], me['input_tokens'], me['prompt_tokens'])
               const mCr = firstValue(me['cache_read_input_tokens'], me['cache_read_tokens'], me['cached_input_tokens'])
               const mCw = firstValue(me['cache_creation_input_tokens'], me['cache_creation_tokens'], me['cache_write_tokens'])
-              const mInp = Math.max(0, mTotalIn - mCr - mCw)
+              const mInp = modelInputTokens(me, mCr, mCw)
               const mOut = firstValue(me['total_output_tokens'], me['output_tokens'], me['completion_tokens'])
               const mReasoning = firstValue(me['reasoning_tokens'], me['thinking_tokens'])
               const mCostField = reportedCost(me['cost'], me['cost_usd'], me['total_cost'], me['total_cost_usd'])
+              const role = String(me['role'] ?? '')
               const mCost = mCostField.reported
                 ? mCostField.cost
                 : calculateCost(mModel, mInp, mOut, mCw, mCr, 0, 'standard', 0)
@@ -354,13 +378,19 @@ function createParser(source: SessionSource, seenKeys: Set<string>): SessionPars
                 reasoningTokens: mReasoning,
                 costUSD: mCost,
                 costIsEstimated: !mCostField.reported,
+                subagentTypes: subagentTypesForRole(role),
                 deduplicationKey: `${PROVIDER_NAME}:${source.path}:${turnKey}:model:${modelIdx}:${mModel}`,
               })
               if (call) yield call
             }
           } else {
             // Single model or aggregate: emit one call
-            const call = emitCall()
+            const onlyModelUsage = Array.isArray(modelsUsage) && modelsUsage.length === 1 && modelsUsage[0] && typeof modelsUsage[0] === 'object'
+              ? modelsUsage[0] as Record<string, unknown>
+              : undefined
+            const call = emitCall({
+              subagentTypes: onlyModelUsage ? subagentTypesForRole(String(onlyModelUsage['role'] ?? '')) : [],
+            })
             if (call) yield call
           }
 

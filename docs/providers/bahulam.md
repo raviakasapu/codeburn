@@ -8,7 +8,7 @@ Bahulam Code — open-source coding agent.
 
 ## Where it reads from
 
-`~/.bahulam/projects/`. Honors `BAHULAM_PROJECTS_DIR` env override, matching opentab's convention.
+`~/.bahulam/projects/`. Honors `BAHULAM_PROJECTS_DIR`, or `BAHULAM_HOME/projects` when the explicit projects dir is unset, matching opentab's convention.
 
 ## Storage format
 
@@ -18,7 +18,7 @@ JSONL. Each file is one session under a project slug directory:
 ~/.bahulam/projects/<project-slug>/<session-id>.jsonl
 ```
 
-The wire format uses `bahulam_event` / `kepler_event` as the top-level type. Per-turn token usage and cost live in `event.data.usage` on `complete` events. Every record carries `type`, `timestamp`, and `cwd` at the top level.
+The wire format uses `bahulam_event` as the top-level type. Per-turn token usage and cost live in `event.data.usage` on `complete` events. Every record carries `type`, `timestamp`, and `cwd` at the top level.
 
 ## Caching
 
@@ -38,4 +38,4 @@ Bahulam records per-turn cost on `complete` events. Reported costs, including `$
 - Cache write 1h-TTL tokens are extracted from `usage.cache_creation.ephemeral_1h_input_tokens`.
 - Model names may be bare strings (e.g. `deepseek-v4-pro`). The provider prefixes known families (`openai/`, `anthropic/`, `google/`, `deepseek/`) for LiteLLM pricing lookup.
 - Tools are extracted from `tool_call` / `tool_request` events and queued for the next `complete` turn.
-- No subagent / sidecar transcripts — each JSONL file is one self-contained session.
+- No subagent sidecar transcripts — each JSONL file is one self-contained session. Subagent spend is represented inside `complete.usage.models[]`; non-root model roles such as `plan` or `explore` are emitted as CodeBurn `subagentTypes`.
